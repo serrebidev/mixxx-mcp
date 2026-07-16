@@ -2,10 +2,17 @@
  * mixxx-mcp.js — Mixxx Controller Script v1.1.0
  *
  * Bridges Mixxx ControlObjects ↔ mixxx-mcp Python server via:
- *   WRITE:  Python → MIDI CC → this script → engine.setValue()
- *   READ:   engine.makeConnection() → XHR POST → Python state server
+ *   WRITE:  Python → MIDI CC (ch 1) → this script → engine.setValue()
+ *   READ:   engine.makeConnection() → MIDI SysEx → Python state store
  *
- * Compatible: Mixxx 2.4+ (ES7, QJSEngine, XMLHttpRequest available)
+ * Both directions share the one virtual MIDI port. The read path uses SysEx
+ * because Mixxx's script engine has no network access at all (no
+ * XMLHttpRequest, no fetch), and because SysEx can carry arbitrary-length
+ * payloads — a 7-bit CC cannot represent a BPM or a track title.
+ * Mixxx ignores the SysEx it emits (it matches no CC mapping), and the Python
+ * side ignores the CCs it emits, so the shared port does not feed back.
+ *
+ * Compatible: Mixxx 2.4+ (QJSEngine)
  *
  * Install: %LOCALAPPDATA%\Mixxx\controllers\  (Windows)
  *          ~/.mixxx/controllers/               (Linux)
@@ -15,132 +22,130 @@
 "use strict";
 
 // ── Config ────────────────────────────────────────────────────────────────
-const MCP_STATE_URL = "http://127.0.0.1:57121/state";
-const MCP_DEBOUNCE_MS = 50; // min ms between XHR pushes per control
+// SysEx: F0 <MCP_SYSEX_ID> <ascii JSON> F7. 0x7D is the MIDI-reserved
+// "non-commercial / educational" manufacturer ID.
+const MCP_SYSEX_ID = 0x7D;
+const MCP_DEBOUNCE_MS = 50; // min ms between state pushes per control
 
 // ── CC → (group, key, scale) routing table ────────────────────────────────
-const CC_ROUTE = {
-    // Channel 1
-    0:  { group: "[Channel1]", key: "play",              scale: "binary"   },
-    1:  { group: "[Channel1]", key: "cue_default",       scale: "binary"   },
-    2:  { group: "[Channel1]", key: "sync_enabled",      scale: "binary"   },
-    3:  { group: "[Channel1]", key: "volume",            scale: "unipolar" },
-    4:  { group: "[Channel1]", key: "pregain",           scale: "eq"       },
-    5:  { group: "[Channel1]", key: "rate",              scale: "bipolar"  },
-    6:  { group: "[Channel1]", key: "filterLow",         scale: "eq"       },
-    7:  { group: "[Channel1]", key: "filterMid",         scale: "eq"       },
-    8:  { group: "[Channel1]", key: "filterHigh",        scale: "eq"       },
-    9:  { group: "[Channel1]", key: "beatloop_size",     scale: "beatloop" },
-    10: { group: "[Channel1]", key: "beatloop_activate", scale: "binary"   },
-    11: { group: "[Channel1]", key: "reloop_toggle",     scale: "binary"   },
-    12: { group: "[Channel1]", key: "loop_halve",        scale: "binary"   },
-    13: { group: "[Channel1]", key: "loop_double",       scale: "binary"   },
-    14: { group: "[Channel1]", key: "hotcue_1_set",      scale: "binary"   },
-    15: { group: "[Channel1]", key: "hotcue_1_goto",     scale: "binary"   },
-    16: { group: "[Channel1]", key: "hotcue_1_clear",    scale: "binary"   },
-    17: { group: "[Channel1]", key: "hotcue_2_set",      scale: "binary"   },
-    18: { group: "[Channel1]", key: "hotcue_2_goto",     scale: "binary"   },
-    19: { group: "[Channel1]", key: "hotcue_2_clear",    scale: "binary"   },
-    // Channel 2
-    20: { group: "[Channel2]", key: "play",              scale: "binary"   },
-    21: { group: "[Channel2]", key: "cue_default",       scale: "binary"   },
-    22: { group: "[Channel2]", key: "sync_enabled",      scale: "binary"   },
-    23: { group: "[Channel2]", key: "volume",            scale: "unipolar" },
-    24: { group: "[Channel2]", key: "pregain",           scale: "eq"       },
-    25: { group: "[Channel2]", key: "rate",              scale: "bipolar"  },
-    26: { group: "[Channel2]", key: "filterLow",         scale: "eq"       },
-    27: { group: "[Channel2]", key: "filterMid",         scale: "eq"       },
-    28: { group: "[Channel2]", key: "filterHigh",        scale: "eq"       },
-    29: { group: "[Channel2]", key: "beatloop_size",     scale: "beatloop" },
-    30: { group: "[Channel2]", key: "beatloop_activate", scale: "binary"   },
-    31: { group: "[Channel2]", key: "reloop_toggle",     scale: "binary"   },
-    32: { group: "[Channel2]", key: "loop_halve",        scale: "binary"   },
-    33: { group: "[Channel2]", key: "loop_double",       scale: "binary"   },
-    34: { group: "[Channel2]", key: "hotcue_1_set",      scale: "binary"   },
-    35: { group: "[Channel2]", key: "hotcue_1_goto",     scale: "binary"   },
-    36: { group: "[Channel2]", key: "hotcue_1_clear",    scale: "binary"   },
-    37: { group: "[Channel2]", key: "hotcue_2_set",      scale: "binary"   },
-    38: { group: "[Channel2]", key: "hotcue_2_goto",     scale: "binary"   },
-    39: { group: "[Channel2]", key: "hotcue_2_clear",    scale: "binary"   },
-    // Channel 3
-    40: { group: "[Channel3]", key: "play",              scale: "binary"   },
-    41: { group: "[Channel3]", key: "cue_default",       scale: "binary"   },
-    42: { group: "[Channel3]", key: "sync_enabled",      scale: "binary"   },
-    43: { group: "[Channel3]", key: "volume",            scale: "unipolar" },
-    44: { group: "[Channel3]", key: "pregain",           scale: "eq"       },
-    45: { group: "[Channel3]", key: "rate",              scale: "bipolar"  },
-    46: { group: "[Channel3]", key: "filterLow",         scale: "eq"       },
-    47: { group: "[Channel3]", key: "filterMid",         scale: "eq"       },
-    48: { group: "[Channel3]", key: "filterHigh",        scale: "eq"       },
-    49: { group: "[Channel3]", key: "beatloop_activate", scale: "binary"   },
-    50: { group: "[Channel3]", key: "loop_halve",        scale: "binary"   },
-    51: { group: "[Channel3]", key: "loop_double",       scale: "binary"   },
-    // Channel 4
-    60: { group: "[Channel4]", key: "play",              scale: "binary"   },
-    61: { group: "[Channel4]", key: "cue_default",       scale: "binary"   },
-    62: { group: "[Channel4]", key: "sync_enabled",      scale: "binary"   },
-    63: { group: "[Channel4]", key: "volume",            scale: "unipolar" },
-    64: { group: "[Channel4]", key: "pregain",           scale: "eq"       },
-    65: { group: "[Channel4]", key: "rate",              scale: "bipolar"  },
-    66: { group: "[Channel4]", key: "filterLow",         scale: "eq"       },
-    67: { group: "[Channel4]", key: "filterMid",         scale: "eq"       },
-    68: { group: "[Channel4]", key: "filterHigh",        scale: "eq"       },
-    69: { group: "[Channel4]", key: "beatloop_activate", scale: "binary"   },
-    70: { group: "[Channel4]", key: "loop_halve",        scale: "binary"   },
-    71: { group: "[Channel4]", key: "loop_double",       scale: "binary"   },
-    // Master
-    80: { group: "[Master]",   key: "crossfader",        scale: "bipolar"  },
-    81: { group: "[Master]",   key: "volume",            scale: "unipolar" },
-    82: { group: "[Master]",   key: "headVolume",        scale: "unipolar" },
-    83: { group: "[Master]",   key: "headMix",           scale: "bipolar"  },
-    84: { group: "[Master]",   key: "balance",           scale: "bipolar"  },
-    // Effects
-    100: { group: "[EffectRack1_EffectUnit1]", key: "mix",     scale: "unipolar" },
-    101: { group: "[EffectRack1_EffectUnit2]", key: "mix",     scale: "unipolar" },
-    102: { group: "[EffectRack1_EffectUnit3]", key: "mix",     scale: "unipolar" },
-    103: { group: "[EffectRack1_EffectUnit4]", key: "mix",     scale: "unipolar" },
-    104: { group: "[EffectRack1_EffectUnit1_Effect1]", key: "enabled", scale: "binary" },
-    105: { group: "[EffectRack1_EffectUnit1_Effect2]", key: "enabled", scale: "binary" },
-    106: { group: "[EffectRack1_EffectUnit1_Effect3]", key: "enabled", scale: "binary" },
-    // Rate nudge (deck-relative — uses _activeDeck)
-    110: { group: null, key: "rate_perm_up_small",   scale: "binary", deckRelative: true },
-    111: { group: null, key: "rate_perm_down_small", scale: "binary", deckRelative: true },
-    112: { group: null, key: "rate_perm_up",         scale: "binary", deckRelative: true },
-    113: { group: null, key: "rate_perm_down",       scale: "binary", deckRelative: true },
-    114: { group: null, key: "beatjump_size",        scale: "raw",    deckRelative: true },
-    115: { group: null, key: "beatjump_forward",     scale: "binary", deckRelative: true },
-    116: { group: null, key: "beatjump_backward",    scale: "binary", deckRelative: true },
-};
+// MUST mirror MIDI_CC_MAP in src/controls.py exactly. Built from the same block
+// layout so the two cannot drift:
+//   0–37 Ch1 (0–13 controls, 14–37 hotcues 1–8), 38–75 Ch2, 76–87 Ch3,
+//   88–99 Ch4, 100–104 Master, 105–111 Effects, 112–118 nudge/beatjump.
+const DECK_CONTROLS = [
+    ["play",              "binary"],
+    ["cue_default",       "binary"],
+    ["sync_enabled",      "binary"],
+    ["volume",            "unipolar"],
+    ["pregain",           "eq"],
+    ["rate",              "bipolar"],
+    ["filterLow",         "eq"],
+    ["filterMid",         "eq"],
+    ["filterHigh",        "eq"],
+    ["beatloop_size",     "beatloop"],
+    ["beatloop_activate", "binary"],
+    ["reloop_toggle",     "binary"],
+    ["loop_halve",        "binary"],
+    ["loop_double",       "binary"],
+];
 
-// Hotcue slots 3–8 for channels 1–2
-(function buildHotcueRoutes() {
-    const actions = ["set", "goto", "clear"];
-    for (let ch = 1; ch <= 2; ch++) {
-        for (let slot = 3; slot <= 8; slot++) {
-            const base = 50 + ((ch - 1) * 18) + ((slot - 3) * 3);
-            actions.forEach((action, i) => {
-                CC_ROUTE[base + i] = {
-                    group: `[Channel${ch}]`,
-                    key: `hotcue_${slot}_${action}`,
-                    scale: "binary"
+const DECK34_CONTROLS = [
+    ["play",              "binary"],
+    ["cue_default",       "binary"],
+    ["sync_enabled",      "binary"],
+    ["volume",            "unipolar"],
+    ["pregain",           "eq"],
+    ["rate",              "bipolar"],
+    ["filterLow",         "eq"],
+    ["filterMid",         "eq"],
+    ["filterHigh",        "eq"],
+    ["beatloop_activate", "binary"],
+    ["loop_halve",        "binary"],
+    ["loop_double",       "binary"],
+];
+
+// Not controls: the server sends these to ask for a full state re-push, and to
+// select which deck the deck-relative CCs (nudge/beatjump) act on.
+// Must match RESYNC_CC / ACTIVE_DECK_CC in src/controls.py.
+const RESYNC_CC = 119;
+const ACTIVE_DECK_CC = 120;
+
+const HOTCUE_ACTIONS = ["set", "goto", "clear"];
+const DECK12_BASE = { 1: 0, 2: 38 };
+const DECK12_HOTCUE_OFFSET = 14;
+const DECK34_BASE = { 3: 76, 4: 88 };
+const MASTER_BASE = 100;
+const FX_BASE = 105;
+const NUDGE_BASE = 112;
+
+const CC_ROUTE = {};
+
+(function buildRoutes() {
+    // Decks 1–2: controls + hotcues 1–8
+    for (const deck of [1, 2]) {
+        const base = DECK12_BASE[deck];
+        const group = `[Channel${deck}]`;
+        DECK_CONTROLS.forEach(([key, scale], i) => {
+            CC_ROUTE[base + i] = { group, key, scale };
+        });
+        for (let slot = 1; slot <= 8; slot++) {
+            const slotBase = base + DECK12_HOTCUE_OFFSET + (slot - 1) * 3;
+            HOTCUE_ACTIONS.forEach((action, j) => {
+                CC_ROUTE[slotBase + j] = {
+                    group, key: `hotcue_${slot}_${action}`, scale: "binary",
                 };
             });
         }
     }
+    // Decks 3–4: reduced control set
+    for (const deck of [3, 4]) {
+        const base = DECK34_BASE[deck];
+        const group = `[Channel${deck}]`;
+        DECK34_CONTROLS.forEach(([key, scale], i) => {
+            CC_ROUTE[base + i] = { group, key, scale };
+        });
+    }
+    // Master
+    [["crossfader", "bipolar"], ["volume", "unipolar"], ["headVolume", "unipolar"],
+     ["headMix", "bipolar"], ["balance", "bipolar"]].forEach(([key, scale], i) => {
+        CC_ROUTE[MASTER_BASE + i] = { group: "[Master]", key, scale };
+    });
+    // Effects: 4 unit mixes then 3 effect enables
+    for (let i = 0; i < 4; i++) {
+        CC_ROUTE[FX_BASE + i] = {
+            group: `[EffectRack1_EffectUnit${i + 1}]`, key: "mix", scale: "unipolar",
+        };
+    }
+    for (let i = 0; i < 3; i++) {
+        CC_ROUTE[FX_BASE + 4 + i] = {
+            group: `[EffectRack1_EffectUnit1_Effect${i + 1}]`, key: "enabled", scale: "binary",
+        };
+    }
+    // Deck-relative nudge / beatjump
+    [["rate_perm_up_small", "binary"], ["rate_perm_down_small", "binary"],
+     ["rate_perm_up", "binary"], ["rate_perm_down", "binary"],
+     ["beatjump_size", "raw"], ["beatjump_forward", "binary"],
+     ["beatjump_backward", "binary"]].forEach(([key, scale], i) => {
+        CC_ROUTE[NUDGE_BASE + i] = { group: null, key, scale, deckRelative: true };
+    });
 })();
 
 // ── Controls to watch (state push to Python) ──────────────────────────────
 const WATCH = {
+    // NB: track_artist / track_title are NOT ControlObjects in Mixxx — Mixxx
+    // logs "non-existent" and returns 0.0 for them, so watching them only
+    // produced misleading zeroes. Track metadata is not exposed to controller
+    // scripts; use track_loaded/duration to tell whether a deck has a track.
     "[Channel1]": ["play","bpm","playposition","volume","pregain","rate",
                    "sync_enabled","loop_enabled","beatloop_size",
                    "filterLow","filterMid","filterHigh",
-                   "track_artist","track_title","duration","track_samplerate",
+                   "track_loaded","duration","track_samplerate",
                    "hotcue_1_position","hotcue_2_position","hotcue_3_position",
                    "hotcue_4_position"],
     "[Channel2]": ["play","bpm","playposition","volume","pregain","rate",
                    "sync_enabled","loop_enabled","beatloop_size",
                    "filterLow","filterMid","filterHigh",
-                   "track_artist","track_title","duration","track_samplerate"],
+                   "track_loaded","duration","track_samplerate"],
     "[Channel3]": ["play","bpm","playposition","volume","rate","sync_enabled"],
     "[Channel4]": ["play","bpm","playposition","volume","rate","sync_enabled"],
     "[Master]":   ["crossfader","volume","headVolume","headMix","balance"],
@@ -153,9 +158,12 @@ function decode(midiVal, scale) {
     switch (scale) {
         case "binary":   return midiVal >= 64 ? 1.0 : 0.0;
         case "unipolar": return midiVal / 127.0;
-        case "bipolar":  return (midiVal / 127.0) * 2.0 - 1.0;
+        // Centred on 64 so 0.0 is exactly representable — see _encode() in
+        // src/midi_bridge.py. 64 = 0.0, 1 = -1.0, 127 = +1.0.
+        case "bipolar":  return Math.max(-1.0, Math.min(1.0, (midiVal - 64) / 63.0));
         case "eq":       return (midiVal / 127.0) * 4.0;
         case "beatloop": {
+            // Index into BEATLOOP_SIZES in src/controls.py — keep in sync.
             const sizes = [0.03125,0.0625,0.125,0.25,0.5,1,2,4,8,16,32,64];
             return sizes[Math.round((midiVal / 127.0) * (sizes.length - 1))] || 4;
         }
@@ -164,8 +172,17 @@ function decode(midiVal, scale) {
     }
 }
 
-// ── XHR state push (fire-and-forget, debounced) ───────────────────────────
+// ── SysEx state push (fire-and-forget, debounced) ─────────────────────────
 const _lastPush = {};
+
+// SysEx data bytes must be 7-bit, so escape anything above ASCII '~' as \uXXXX.
+// JSON.stringify already escapes control characters and quotes, and Python's
+// json.loads decodes the \uXXXX escapes back to the original text.
+function asciiSafe(s) {
+    return s.replace(/[\u007F-\uFFFF]/g, function (c) {
+        return "\\u" + ("0000" + c.charCodeAt(0).toString(16)).slice(-4);
+    });
+}
 
 function pushState(group, key, value) {
     const ck = `${group}/${key}`;
@@ -174,13 +191,15 @@ function pushState(group, key, value) {
     _lastPush[ck] = now;
 
     try {
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", MCP_STATE_URL, true); // async
-        xhr.setRequestHeader("Content-Type", "application/json");
-        xhr.send(JSON.stringify({ group, key, value }));
-        // no response handling — fire and forget
+        const json = asciiSafe(JSON.stringify({ g: group, k: key, v: value }));
+        const bytes = [0xF0, MCP_SYSEX_ID];
+        for (let i = 0; i < json.length; i++) {
+            bytes.push(json.charCodeAt(i) & 0x7F);
+        }
+        bytes.push(0xF7);
+        midi.sendSysexMsg(bytes, bytes.length);
     } catch (e) {
-        // Python server not running — fail silently, MIDI still works
+        // Nothing listening, or the port is closed — writes still work.
     }
 }
 
@@ -192,7 +211,10 @@ const TRIGGER_KEYS = new Set([
 ]);
 
 // ── Main controller object ────────────────────────────────────────────────
-const MixxxMCP = {
+// Declared with `var`, not `const`: Mixxx resolves the mapping's function names
+// (e.g. "MixxxMCP.handleCC") in a separate evaluate() call, which only sees the
+// global object. A top-level `const` stays lexically scoped and is invisible there.
+var MixxxMCP = {
     _activeDeck: 1,
     _connections: [],
 
@@ -218,22 +240,34 @@ const MixxxMCP = {
             }
         }
 
-        // Push initial state snapshot so Python has values immediately
-        setTimeout(() => {
-            for (const [grp, keys] of Object.entries(WATCH)) {
-                for (const key of keys) {
-                    try {
-                        const val = engine.getValue(grp, key);
-                        if (val !== undefined && val !== null) {
-                            pushState(grp, key, val);
-                        }
-                    } catch(e) {}
-                }
-            }
-            console.log("[mixxx-mcp] initial state snapshot pushed");
-        }, 1000);
+        // Push an initial snapshot so a server that is already running sees
+        // values immediately. Mixxx's script engine has no setTimeout;
+        // engine.beginTimer(ms, cb, true) is the one-shot equivalent.
+        engine.beginTimer(1000, () => this.pushSnapshot(), true);
 
         console.log(`[mixxx-mcp] ready — ${this._connections.length} connections active`);
+    },
+
+    /**
+     * Re-push every watched control. Mixxx normally starts before the MCP
+     * server, so the boot snapshot lands with nothing listening; the server
+     * sends RESYNC_CC on connect to ask for this again.
+     */
+    pushSnapshot() {
+        let n = 0;
+        for (const [grp, keys] of Object.entries(WATCH)) {
+            for (const key of keys) {
+                try {
+                    const val = engine.getValue(grp, key);
+                    if (val !== undefined && val !== null) {
+                        delete _lastPush[`${grp}/${key}`]; // bypass debounce
+                        pushState(grp, key, val);
+                        n++;
+                    }
+                } catch(e) {}
+            }
+        }
+        console.log(`[mixxx-mcp] state snapshot pushed (${n} values)`);
     },
 
     shutdown(id) {
@@ -244,6 +278,17 @@ const MixxxMCP = {
 
     // ── MIDI CC handler ──────────────────────────────────────────────────
     handleCC(channel, control, value, status, group) {
+        if (control === RESYNC_CC) {
+            this.pushSnapshot();
+            return;
+        }
+        if (control === ACTIVE_DECK_CC) {
+            // The server sends this immediately before each deck-relative CC.
+            if (value >= 1 && value <= 4) {
+                this._activeDeck = value;
+            }
+            return;
+        }
         const route = CC_ROUTE[control];
         if (!route) {
             console.log(`[mixxx-mcp] Unknown CC ${control} — ignored`);

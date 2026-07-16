@@ -1,137 +1,156 @@
 """
 controls.py — Mixxx control group/key → MIDI CC mapping table
 
-CC numbering scheme (0–127):
-  CC 0–19   → Channel1 controls
-  CC 20–39  → Channel2 controls
-  CC 40–59  → Channel3 controls
-  CC 60–79  → Channel4 controls
-  CC 80–99  → Master controls
-  CC 100–119 → Effect controls
-  CC 120–127 → Reserved
+CC allocation (0–127, single MIDI channel). Every CC is used by exactly one
+(group, key); the assertion at the bottom of this module enforces that.
 
-The companion Mixxx JS script uses this same table to route
-incoming CC messages → engine.setValue() calls.
+  0–37    Channel1   (0–13 controls, 14–37 hotcues 1–8)
+  38–75   Channel2   (38–51 controls, 52–75 hotcues 1–8)
+  76–87   Channel3   (12 controls, no hotcues)
+  88–99   Channel4   (12 controls, no hotcues)
+  100–104 Master     (crossfader, volume, headVolume, headMix, balance)
+  105–111 Effects    (4 unit mixes, 3 effect enables)
+  112–118 Deck-relative nudge / beatjump
+  119     Resync request (server → script: re-push the full state snapshot)
+  120–127 Reserved
+
+Hotcues are only mapped for decks 1–2: 8 slots x 3 actions x 4 decks would not
+fit in the 128-CC space alongside everything else.
+
+The companion Mixxx JS script (mixxx-mcp.js) mirrors this table exactly and must
+be kept in sync — see CC_ROUTE there.
 """
 
 from typing import Dict, Tuple, Optional
 
+# Beatloop sizes, in beats. Both sides encode/decode beatloop_size as an index
+# into this list (see the "beatloop" scale) rather than as a raw beat count —
+# a raw 0–127 MIDI byte cannot represent fractional sizes like 0.125.
+BEATLOOP_SIZES = [0.03125, 0.0625, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64]
+
+# Per-deck control offsets within a deck's CC block (decks 1–2).
+_DECK_CONTROLS = [
+    ("play",              "binary"),
+    ("cue_default",       "binary"),
+    ("sync_enabled",      "binary"),
+    ("volume",            "unipolar"),
+    ("pregain",           "eq"),
+    ("rate",              "bipolar"),
+    ("filterLow",         "eq"),
+    ("filterMid",         "eq"),
+    ("filterHigh",        "eq"),
+    ("beatloop_size",     "beatloop"),
+    ("beatloop_activate", "binary"),
+    ("reloop_toggle",     "binary"),
+    ("loop_halve",        "binary"),
+    ("loop_double",       "binary"),
+]
+
+# Decks 3–4 carry a reduced set (no hotcues, no beatloop_size/reloop_toggle).
+_DECK34_CONTROLS = [
+    ("play",              "binary"),
+    ("cue_default",       "binary"),
+    ("sync_enabled",      "binary"),
+    ("volume",            "unipolar"),
+    ("pregain",           "eq"),
+    ("rate",              "bipolar"),
+    ("filterLow",         "eq"),
+    ("filterMid",         "eq"),
+    ("filterHigh",        "eq"),
+    ("beatloop_activate", "binary"),
+    ("loop_halve",        "binary"),
+    ("loop_double",       "binary"),
+]
+
+_HOTCUE_ACTIONS = ["set", "goto", "clear"]
+
+# Not a control: sending this CC asks mixxx-mcp.js to re-push every watched
+# value. Mixxx pushes its snapshot when *it* starts, which is usually before
+# this server exists, so without this the state store starts out empty.
+RESYNC_CC = 119
+
+# Not a control: selects which deck the deck-relative CCs (nudge/beatjump) act
+# on. Those share one CC across all decks, so the script needs to be told the
+# target first — otherwise every nudge lands on deck 1.
+ACTIVE_DECK_CC = 120
+
+# Block base addresses.
+DECK12_BASE = {1: 0, 2: 38}
+DECK12_HOTCUE_OFFSET = 14
+DECK34_BASE = {3: 76, 4: 88}
+MASTER_BASE = 100
+FX_BASE = 105
+NUDGE_BASE = 112
+
+DECKS_WITH_HOTCUES = (1, 2)
+
 # (group, key) → (cc_number, scale)
-# scale: "binary" | "unipolar" | "bipolar" | "eq" | "raw"
-MIDI_CC_MAP: Dict[Tuple[str, str], Tuple[int, str]] = {
+# scale: "binary" | "unipolar" | "bipolar" | "eq" | "beatloop" | "raw"
+MIDI_CC_MAP: Dict[Tuple[str, str], Tuple[int, str]] = {}
 
-    # ── Channel 1 ──────────────────────────────────────────────────────────
-    ("[Channel1]", "play"):             (0,  "binary"),
-    ("[Channel1]", "cue_default"):      (1,  "binary"),
-    ("[Channel1]", "sync_enabled"):     (2,  "binary"),
-    ("[Channel1]", "volume"):           (3,  "unipolar"),
-    ("[Channel1]", "pregain"):          (4,  "eq"),
-    ("[Channel1]", "rate"):             (5,  "bipolar"),
-    ("[Channel1]", "filterLow"):        (6,  "eq"),
-    ("[Channel1]", "filterMid"):        (7,  "eq"),
-    ("[Channel1]", "filterHigh"):       (8,  "eq"),
-    ("[Channel1]", "beatloop_size"):    (9,  "raw"),
-    ("[Channel1]", "beatloop_activate"):(10, "binary"),
-    ("[Channel1]", "reloop_toggle"):    (11, "binary"),
-    ("[Channel1]", "loop_halve"):       (12, "binary"),
-    ("[Channel1]", "loop_double"):      (13, "binary"),
-    ("[Channel1]", "hotcue_1_set"):     (14, "binary"),
-    ("[Channel1]", "hotcue_1_goto"):    (15, "binary"),
-    ("[Channel1]", "hotcue_1_clear"):   (16, "binary"),
-    ("[Channel1]", "hotcue_2_set"):     (17, "binary"),
-    ("[Channel1]", "hotcue_2_goto"):    (18, "binary"),
-    ("[Channel1]", "hotcue_2_clear"):   (19, "binary"),
+# ── Decks 1–2: controls + hotcues 1–8 ─────────────────────────────────────────
+for _deck, _base in DECK12_BASE.items():
+    _grp = f"[Channel{_deck}]"
+    for _i, (_key, _scale) in enumerate(_DECK_CONTROLS):
+        MIDI_CC_MAP[(_grp, _key)] = (_base + _i, _scale)
+    for _slot in range(1, 9):
+        _slot_base = _base + DECK12_HOTCUE_OFFSET + (_slot - 1) * 3
+        for _j, _action in enumerate(_HOTCUE_ACTIONS):
+            MIDI_CC_MAP[(_grp, f"hotcue_{_slot}_{_action}")] = (_slot_base + _j, "binary")
 
-    # ── Channel 2 ──────────────────────────────────────────────────────────
-    ("[Channel2]", "play"):             (20, "binary"),
-    ("[Channel2]", "cue_default"):      (21, "binary"),
-    ("[Channel2]", "sync_enabled"):     (22, "binary"),
-    ("[Channel2]", "volume"):           (23, "unipolar"),
-    ("[Channel2]", "pregain"):          (24, "eq"),
-    ("[Channel2]", "rate"):             (25, "bipolar"),
-    ("[Channel2]", "filterLow"):        (26, "eq"),
-    ("[Channel2]", "filterMid"):        (27, "eq"),
-    ("[Channel2]", "filterHigh"):       (28, "eq"),
-    ("[Channel2]", "beatloop_size"):    (29, "raw"),
-    ("[Channel2]", "beatloop_activate"):(30, "binary"),
-    ("[Channel2]", "reloop_toggle"):    (31, "binary"),
-    ("[Channel2]", "loop_halve"):       (32, "binary"),
-    ("[Channel2]", "loop_double"):      (33, "binary"),
-    ("[Channel2]", "hotcue_1_set"):     (34, "binary"),
-    ("[Channel2]", "hotcue_1_goto"):    (35, "binary"),
-    ("[Channel2]", "hotcue_1_clear"):   (36, "binary"),
-    ("[Channel2]", "hotcue_2_set"):     (37, "binary"),
-    ("[Channel2]", "hotcue_2_goto"):    (38, "binary"),
-    ("[Channel2]", "hotcue_2_clear"):   (39, "binary"),
+# ── Decks 3–4: reduced control set ────────────────────────────────────────────
+for _deck, _base in DECK34_BASE.items():
+    _grp = f"[Channel{_deck}]"
+    for _i, (_key, _scale) in enumerate(_DECK34_CONTROLS):
+        MIDI_CC_MAP[(_grp, _key)] = (_base + _i, _scale)
 
-    # ── Channel 3 ──────────────────────────────────────────────────────────
-    ("[Channel3]", "play"):             (40, "binary"),
-    ("[Channel3]", "cue_default"):      (41, "binary"),
-    ("[Channel3]", "sync_enabled"):     (42, "binary"),
-    ("[Channel3]", "volume"):           (43, "unipolar"),
-    ("[Channel3]", "pregain"):          (44, "eq"),
-    ("[Channel3]", "rate"):             (45, "bipolar"),
-    ("[Channel3]", "filterLow"):        (46, "eq"),
-    ("[Channel3]", "filterMid"):        (47, "eq"),
-    ("[Channel3]", "filterHigh"):       (48, "eq"),
-    ("[Channel3]", "beatloop_activate"):(49, "binary"),
-    ("[Channel3]", "loop_halve"):       (50, "binary"),
-    ("[Channel3]", "loop_double"):      (51, "binary"),
+# ── Master ────────────────────────────────────────────────────────────────────
+for _i, (_key, _scale) in enumerate([
+    ("crossfader", "bipolar"),
+    ("volume",     "unipolar"),
+    ("headVolume", "unipolar"),
+    ("headMix",    "bipolar"),
+    ("balance",    "bipolar"),
+]):
+    MIDI_CC_MAP[("[Master]", _key)] = (MASTER_BASE + _i, _scale)
 
-    # ── Channel 4 ──────────────────────────────────────────────────────────
-    ("[Channel4]", "play"):             (60, "binary"),
-    ("[Channel4]", "cue_default"):      (61, "binary"),
-    ("[Channel4]", "sync_enabled"):     (62, "binary"),
-    ("[Channel4]", "volume"):           (63, "unipolar"),
-    ("[Channel4]", "pregain"):          (64, "eq"),
-    ("[Channel4]", "rate"):             (65, "bipolar"),
-    ("[Channel4]", "filterLow"):        (66, "eq"),
-    ("[Channel4]", "filterMid"):        (67, "eq"),
-    ("[Channel4]", "filterHigh"):       (68, "eq"),
-    ("[Channel4]", "beatloop_activate"):(69, "binary"),
-    ("[Channel4]", "loop_halve"):       (70, "binary"),
-    ("[Channel4]", "loop_double"):      (71, "binary"),
+# ── Effects ───────────────────────────────────────────────────────────────────
+for _i in range(4):
+    MIDI_CC_MAP[(f"[EffectRack1_EffectUnit{_i + 1}]", "mix")] = (FX_BASE + _i, "unipolar")
+for _i in range(3):
+    MIDI_CC_MAP[(f"[EffectRack1_EffectUnit1_Effect{_i + 1}]", "enabled")] = (
+        FX_BASE + 4 + _i, "binary",
+    )
 
-    # ── Master ─────────────────────────────────────────────────────────────
-    ("[Master]", "crossfader"):         (80, "bipolar"),
-    ("[Master]", "volume"):             (81, "unipolar"),
-    ("[Master]", "headVolume"):         (82, "unipolar"),
-    ("[Master]", "headMix"):            (83, "bipolar"),
-    ("[Master]", "balance"):            (84, "bipolar"),
+# ── Deck-relative nudge / beatjump (wildcard group) ───────────────────────────
+for _i, (_key, _scale) in enumerate([
+    ("rate_perm_up_small",   "binary"),
+    ("rate_perm_down_small", "binary"),
+    ("rate_perm_up",         "binary"),
+    ("rate_perm_down",       "binary"),
+    ("beatjump_size",        "raw"),
+    ("beatjump_forward",     "binary"),
+    ("beatjump_backward",    "binary"),
+]):
+    MIDI_CC_MAP[("*", _key)] = (NUDGE_BASE + _i, _scale)
 
-    # ── Effects ────────────────────────────────────────────────────────────
-    ("[EffectRack1_EffectUnit1]", "mix"):       (100, "unipolar"),
-    ("[EffectRack1_EffectUnit2]", "mix"):       (101, "unipolar"),
-    ("[EffectRack1_EffectUnit3]", "mix"):       (102, "unipolar"),
-    ("[EffectRack1_EffectUnit4]", "mix"):       (103, "unipolar"),
-    ("[EffectRack1_EffectUnit1_Effect1]", "enabled"): (104, "binary"),
-    ("[EffectRack1_EffectUnit1_Effect2]", "enabled"): (105, "binary"),
-    ("[EffectRack1_EffectUnit1_Effect3]", "enabled"): (106, "binary"),
 
-    # ── Rate nudge (wildcard — same CC slot, different channel groups) ─────
-    ("*", "rate_perm_up_small"):        (110, "binary"),
-    ("*", "rate_perm_down_small"):      (111, "binary"),
-    ("*", "rate_perm_up"):              (112, "binary"),
-    ("*", "rate_perm_down"):            (113, "binary"),
-    ("*", "beatjump_size"):             (114, "raw"),
-    ("*", "beatjump_forward"):          (115, "binary"),
-    ("*", "beatjump_backward"):         (116, "binary"),
-}
+# ── Integrity checks ──────────────────────────────────────────────────────────
+# An earlier revision generated hotcue CCs that silently overwrote the Channel3,
+# Channel4 and Master blocks, so those controls were dead. Fail loudly instead.
+def _assert_no_collisions() -> None:
+    seen: Dict[int, Tuple[str, str]] = {}
+    for (group, key), (cc, _scale) in MIDI_CC_MAP.items():
+        if not 0 <= cc <= 127:
+            raise AssertionError(f"CC {cc} out of range for ({group}, {key})")
+        if cc in seen:
+            raise AssertionError(
+                f"CC {cc} assigned to both {seen[cc]} and {(group, key)}"
+            )
+        seen[cc] = (group, key)
 
-# ── Hotcue slots 3–8 (auto-generated) ────────────────────────────────────────
-_HOTCUE_BASE_CH1 = 17   # cc 17–28 for slots 2–8 on Ch1
-_HOTCUE_BASE_CH2 = 37   # cc 37–48 for slots 2–8 on Ch2
-_HOTCUE_STEP = 3        # set, goto, clear per slot
 
-for _slot in range(3, 9):
-    for _ch, _base in [(1, 14), (2, 34)]:
-        _offset = (_slot - 1) * _HOTCUE_STEP
-        # Note: slots 1–2 already mapped above; slot 3+ overflow into 120+ range
-        # Use a separate CC block 50–79 for extended hotcues
-        _cc = 50 + ((_ch - 1) * 18) + ((_slot - 3) * 3)
-        MIDI_CC_MAP[(f"[Channel{_ch}]", f"hotcue_{_slot}_set")]   = (_cc,     "binary")
-        MIDI_CC_MAP[(f"[Channel{_ch}]", f"hotcue_{_slot}_goto")]  = (_cc + 1, "binary")
-        MIDI_CC_MAP[(f"[Channel{_ch}]", f"hotcue_{_slot}_clear")] = (_cc + 2, "binary")
+_assert_no_collisions()
 
 
 # ── Reverse lookup: CC → (group, key) ────────────────────────────────────────
@@ -146,11 +165,13 @@ VALID_GROUP_PREFIXES = [
     "[PreviewDeck", "[EffectRack", "[Microphone",
 ]
 
+
 def validate_group(group: str):
     if not any(group.startswith(p) for p in VALID_GROUP_PREFIXES):
         raise ValueError(
             f"Unknown group '{group}'. Valid prefixes: {VALID_GROUP_PREFIXES}"
         )
+
 
 def resolve_channel(deck: int) -> str:
     if not 1 <= deck <= 4:
@@ -170,14 +191,14 @@ CONTROL_MAP = {
         "filterLow":         "0.0–4.0. EQ low band.",
         "filterMid":         "0.0–4.0. EQ mid band.",
         "filterHigh":        "0.0–4.0. EQ high band.",
-        "beatloop_size":     "Float. Loop size in beats.",
+        "beatloop_size":     "Float beats. Decks 1–2 only. Snapped to BEATLOOP_SIZES.",
         "beatloop_activate": "Binary. Activate/deactivate beat loop.",
-        "reloop_toggle":     "Binary. Toggle loop on/off.",
+        "reloop_toggle":     "Binary. Toggle loop on/off. Decks 1–2 only.",
         "loop_halve":        "Binary. Halve loop length (trigger).",
         "loop_double":       "Binary. Double loop length (trigger).",
-        "hotcue_N_set":      "Binary. Set hotcue N (1–8) at current position.",
-        "hotcue_N_goto":     "Binary. Jump to hotcue N.",
-        "hotcue_N_clear":    "Binary. Clear hotcue N.",
+        "hotcue_N_set":      "Binary. Set hotcue N (1–8). Decks 1–2 only.",
+        "hotcue_N_goto":     "Binary. Jump to hotcue N. Decks 1–2 only.",
+        "hotcue_N_clear":    "Binary. Clear hotcue N. Decks 1–2 only.",
         "beatjump_size":     "Float. Beatjump size in beats.",
         "beatjump_forward":  "Binary. Jump forward by beatjump_size.",
         "beatjump_backward": "Binary. Jump backward by beatjump_size.",

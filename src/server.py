@@ -3,24 +3,29 @@ mixxx-mcp — MCP server for Mixxx DJ Software
 
 Integration layers:
   WRITE: MCP tool → MidiBridge → rtmidi CC → Mixxx JS → engine.setValue()
-  READ:  Mixxx JS → XHR POST → StateServer (HTTP) → OscStateStore → MCP tool
+  READ:  Mixxx JS → MIDI SysEx → MidiBridge listener → StateStore → MCP tool
 """
 
 import logging
+import sys
+import time
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
-from .midi_bridge import MidiBridge
-from .osc_listener import OscStateStore
-from .state_server import StateServer
+from .midi_bridge import MidiBridge, MidiSendError
+from .state_store import StateStore
 from .controls import CONTROL_MAP, MIDI_CC_MAP, validate_group, resolve_channel
 
-logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s %(message)s")
+# stdout carries JSON-RPC on the stdio transport — logs must go to stderr.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(name)s %(levelname)s %(message)s",
+    stream=sys.stderr,
+)
 log = logging.getLogger("mixxx-mcp")
 
 midi  = MidiBridge()
-state = OscStateStore()
-srv   = StateServer(state)
+state = StateStore()
 
 mcp = FastMCP(
     name="mixxx-mcp",
@@ -223,13 +228,19 @@ def beatjump(deck: int, beats: float) -> dict:
 
 @mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
 def get_deck_state(deck: int) -> dict:
-    """Read all live state for a deck. Returns BPM, position, volume, loop, sync, track info."""
+    """
+    Read all live state for a deck: BPM, position, volume, EQ, loop, sync.
+
+    Track artist/title are not available — Mixxx does not expose track metadata
+    to controller scripts as ControlObjects. Use track_loaded/duration to tell
+    whether a deck has a track.
+    """
     group = resolve_channel(deck)
     keys  = [
         "play","bpm","playposition","volume","pregain",
         "filterLow","filterMid","filterHigh","rate",
         "sync_enabled","loop_enabled","beatloop_size",
-        "track_artist","track_title","duration","track_samplerate",
+        "track_loaded","duration","track_samplerate",
     ]
     result = {"deck": deck, "group": group, "state": {}}
     for k in keys:
@@ -252,6 +263,23 @@ def get_mixer_state() -> dict:
 def get_all_state() -> dict:
     """Dump entire cached state for all groups."""
     return {"ok": True, "state": state.snapshot()}
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
+def resync_state() -> dict:
+    """
+    Ask Mixxx to re-push every watched control value.
+    Useful if state looks stale or empty — e.g. Mixxx was restarted after
+    this server started, or a track was loaded outside its watch list.
+    """
+    midi.request_resync()
+    time.sleep(0.5)  # let the SysEx burst arrive before we report back
+    snap = state.snapshot()
+    return {
+        "ok": True,
+        "groups": sorted(snap.keys()),
+        "values": sum(len(v) for v in snap.values()),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -305,8 +333,15 @@ def set_effect_mix(unit: int, value: float) -> dict:
 
 def startup():
     midi.connect()
-    srv.start()
+    listening = midi.start_state_listener(state)
+    if listening:
+        # Mixxx pushed its boot snapshot before we existed; ask for it again.
+        try:
+            midi.request_resync()
+        except MidiSendError as e:
+            log.warning("Initial resync failed: %s", e)
     log.info(
-        "mixxx-mcp ready | MIDI port: %s | State server: http://127.0.0.1:%d/state",
-        midi.port_name, srv.port
+        "mixxx-mcp ready | MIDI port: %s | state listener: %s",
+        midi.port_name,
+        "attached" if listening else "UNAVAILABLE (read tools will return no data)",
     )

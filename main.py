@@ -30,12 +30,15 @@ def main():
     startup()
 
     if args.http:
-        print(f"[mixxx-mcp] HTTP transport on {args.host}:{args.port}", flush=True)
+        # Banners go to stderr: on stdio transport stdout carries JSON-RPC only,
+        # and anything else printed there corrupts the protocol stream.
+        print(f"[mixxx-mcp] HTTP transport on {args.host}:{args.port}",
+              file=sys.stderr, flush=True)
         mcp.settings.host = args.host
         mcp.settings.port = args.port
         mcp.run(transport="streamable-http")
     else:
-        print("[mixxx-mcp] stdio transport", flush=True)
+        print("[mixxx-mcp] stdio transport", file=sys.stderr, flush=True)
         mcp.run(transport="stdio")
 
 
