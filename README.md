@@ -33,6 +33,12 @@ connect, and `resync_state()` can request one at any time.
 - **Track artist/title are unavailable.** Mixxx does not expose track metadata to
   controller scripts as ControlObjects. Use `track_loaded` / `duration`.
 - **Tracks cannot be loaded by path.** See below.
+- **Beatgrids cannot be edited.** Mixxx exposes no beatgrid-editing control to
+  controller scripts. `set_bpm()` reaches a tempo with the rate slider, so it
+  cannot rescue a track the analyser read at half or two-thirds time — that
+  needs the library UI. Such a track also cannot be synced: the rate required
+  is outside the slider range, so it clamps and plays at the wrong tempo with
+  no error raised anywhere.
 
 ### Loading tracks
 
@@ -149,7 +155,9 @@ Add to `claude_desktop_config.json`:
 | `play(deck)` | Start playback |
 | `stop(deck)` | Stop playback |
 | `cue(deck)` | Trigger CUE |
-| `sync(deck)` | Toggle BPM sync |
+| `sync(deck)` | Toggle BPM sync (tempo only) |
+| `beatsync_phase(deck)` | Align beats to the sync leader without changing tempo |
+| `set_bpm(deck, bpm)` | Playback tempo in BPM, via the rate slider |
 | `set_volume(deck, value)` | Channel fader 0.0–1.0 |
 | `set_crossfader(value)` | Crossfader -1.0–1.0 |
 | `set_eq(deck, low, mid, high)` | EQ bands 0.0–4.0 |

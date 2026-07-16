@@ -79,6 +79,10 @@ const FX_BASE = 105;
 const NUDGE_BASE = 112;
 const LOAD_SELECTED_CC = 121;
 const LIBRARY_BASE = 122;
+const BEATSYNC_PHASE_CC = 126;
+const BPM_CC = 127;
+// Must match BPM_MIN in src/controls.py.
+const BPM_MIN = 60;
 
 const CC_ROUTE = {};
 
@@ -139,6 +143,13 @@ const CC_ROUTE = {};
      ["clear_search", "binary"], ["focused_widget", "raw"]].forEach(([key, scale], i) => {
         CC_ROUTE[LIBRARY_BASE + i] = { group: "[Library]", key, scale };
     });
+    // Beatmatching: phase alignment and beatgrid repair, both deck-relative.
+    CC_ROUTE[BEATSYNC_PHASE_CC] = {
+        group: null, key: "beatsync_phase", scale: "binary", deckRelative: true,
+    };
+    CC_ROUTE[BPM_CC] = {
+        group: null, key: "bpm", scale: "bpm", deckRelative: true,
+    };
 })();
 
 // ── Controls to watch (state push to Python) ──────────────────────────────
@@ -185,6 +196,7 @@ function decode(midiVal, scale) {
         }
         // Relative step count centred on 64 — see _encode() in src/midi_bridge.py.
         case "signed7": return midiVal - 64;
+        case "bpm":     return midiVal + BPM_MIN;
         case "raw": return midiVal;
         default:    return midiVal / 127.0;
     }
@@ -226,7 +238,7 @@ const TRIGGER_KEYS = new Set([
     "cue_default","beatloop_activate","reloop_toggle",
     "loop_halve","loop_double","beatjump_forward","beatjump_backward",
     "rate_perm_up_small","rate_perm_down_small","rate_perm_up","rate_perm_down",
-    "LoadSelectedTrack","GoToItem","clear_search",
+    "LoadSelectedTrack","GoToItem","clear_search","beatsync_phase",
 ]);
 
 // Relative encoders: Mixxx drops a setValue that does not change the control

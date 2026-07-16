@@ -15,7 +15,12 @@ CC allocation (0–127, single MIDI channel). Every CC is used by exactly one
   120     Active-deck select (server → script: target for deck-relative CCs)
   121     Deck-relative LoadSelectedTrack
   122–125 Library     (MoveVertical, GoToItem, clear_search, focused_widget)
-  126–127 Reserved
+  126     Deck-relative beatsync_phase
+  127     Deck-relative bpm
+
+The 128-CC space is now fully allocated. Anything further needs a SysEx command
+channel (Mixxx dispatches SysEx input to a script via incomingData), which would
+also carry full float precision instead of 7 bits.
 
 Hotcues are only mapped for decks 1–2: 8 slots x 3 actions x 4 decks would not
 fit in the 128-CC space alongside everything else.
@@ -99,6 +104,14 @@ FX_BASE = 105
 NUDGE_BASE = 112
 LOAD_SELECTED_CC = 121
 LIBRARY_BASE = 122
+BEATSYNC_PHASE_CC = 126
+BPM_CC = 127
+
+# "bpm" encodes as an offset from BPM_MIN, one MIDI step per BPM, so whole
+# BPMs survive the 7-bit trip exactly: 140 -> 80 -> 140. A proportional scale
+# would land on 140.1 and quietly drift the beatgrid over a long track.
+BPM_MIN = 60
+BPM_MAX = BPM_MIN + 127
 
 DECKS_WITH_HOTCUES = (1, 2)
 
@@ -155,6 +168,15 @@ for _i, (_key, _scale) in enumerate([
 # LoadSelectedTrack is deck-relative for the same reason nudge is: one CC for
 # all four decks, with ACTIVE_DECK_CC naming the target first.
 MIDI_CC_MAP[("*", "LoadSelectedTrack")] = (LOAD_SELECTED_CC, "binary")
+
+# sync_enabled alone matches tempo but leaves the beats out of phase, which is
+# what "synced but sounds wrong" actually is. beatsync_phase realigns them.
+MIDI_CC_MAP[("*", "beatsync_phase")] = (BEATSYNC_PHASE_CC, "binary")
+
+# Writing bpm moves the rate slider to reach that tempo; it does not touch the
+# beatgrid. Verified against Mixxx 2.5: bpm 138 -> 145 left rate at -0.634.
+# It is set_rate() without having to know the deck's rate range.
+MIDI_CC_MAP[("*", "bpm")] = (BPM_CC, "bpm")
 
 # ── Library navigation ────────────────────────────────────────────────────────
 # MoveVertical is "signed7" rather than "raw": it is a relative move, so it must

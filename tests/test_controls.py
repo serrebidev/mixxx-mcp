@@ -13,12 +13,15 @@ import pytest
 from src.controls import (
     ACTIVE_DECK_CC,
     BEATLOOP_SIZES,
+    BPM_MAX,
+    BPM_MIN,
     FOCUS_TRACKS_TABLE,
     MIDI_CC_MAP,
     RESYNC_CC,
     resolve_channel,
     validate_group,
 )
+from src.midi_bridge import _encode
 
 
 def test_no_two_controls_share_a_cc():
@@ -116,3 +119,25 @@ def test_library_group_validates():
 
 def test_focus_ids_match_mixxx_enum():
     assert FOCUS_TRACKS_TABLE == 3
+
+
+# ── Beatmatching ──────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("key", ["beatsync_phase", "bpm"])
+def test_beatmatch_controls_are_deck_relative(key):
+    assert ("*", key) in MIDI_CC_MAP
+
+
+def test_whole_bpm_survives_the_7_bit_trip_exactly():
+    """A proportional scale lands on 140.1 and drifts the beatgrid over a track."""
+    def js_decode(midi_val):
+        return midi_val + BPM_MIN
+
+    for bpm in (BPM_MIN, 93, 128, 138, 140, 142, BPM_MAX):
+        assert js_decode(_encode(bpm, "bpm")) == bpm
+
+
+def test_cc_space_is_fully_allocated():
+    """126/127 were the last free CCs; anything more needs a SysEx channel."""
+    used = {cc for cc, _ in MIDI_CC_MAP.values()} | {RESYNC_CC, ACTIVE_DECK_CC}
+    assert used == set(range(128))

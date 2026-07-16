@@ -15,6 +15,8 @@ from mcp.server.fastmcp import FastMCP
 from .midi_bridge import MidiBridge, MidiSendError
 from .state_store import StateStore
 from .controls import (
+    BPM_MAX,
+    BPM_MIN,
     CONTROL_MAP,
     FOCUS_NONE,
     FOCUS_SEARCHBAR,
@@ -81,6 +83,39 @@ def sync(deck: int) -> dict:
     new_val = 0.0 if current else 1.0
     midi.send_control(group, "sync_enabled", new_val)
     return {"ok": True, "deck": deck, "sync_enabled": bool(new_val)}
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "idempotentHint": True})
+def beatsync_phase(deck: int) -> dict:
+    """
+    Align a deck's beats to the sync leader's, without changing its tempo.
+
+    sync() matches tempo only. Two decks at the same BPM whose beats land
+    between each other still sound wrong, and that is the usual cause of
+    "it's synced but the mix is off" — use this after starting the deck.
+    """
+    midi.send_control(resolve_channel(deck), "beatsync_phase", 1.0)
+    return {"ok": True, "deck": deck, "action": "beatsync_phase"}
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "idempotentHint": True})
+def set_bpm(deck: int, bpm: float) -> dict:
+    """
+    Set a deck's playback tempo in BPM. deck: 1–4, bpm: 60–187, whole numbers.
+
+    Moves the rate slider to reach that tempo — a friendlier set_rate(), since
+    you need not know the deck's rate range. It does NOT edit the beatgrid: the
+    tempo is reached by playing the existing grid faster or slower.
+
+    So this cannot repair a track the analyser read at half or two-thirds time.
+    Asking a 93 BPM grid for 140 needs +50%, far outside the slider range, so it
+    clamps and plays at the wrong tempo with no error anywhere. Mixxx exposes no
+    beatgrid-editing control to scripts; fix the grid in the library UI instead.
+    """
+    if not BPM_MIN <= bpm <= BPM_MAX:
+        return {"ok": False, "error": f"bpm must be {BPM_MIN}–{BPM_MAX}"}
+    midi.send_control(resolve_channel(deck), "bpm", bpm)
+    return {"ok": True, "deck": deck, "bpm": round(bpm)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
