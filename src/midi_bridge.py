@@ -227,6 +227,8 @@ def _encode(value: float, scale: str) -> int:
         )
         # Chosen so the JS side's round(midi/127 * (len-1)) recovers idx exactly.
         return round(idx * 127 / (len(BEATLOOP_SIZES) - 1))
+    elif scale == "signed7":      # -64–63 relative step count, centred on 64
+        return int(max(-64, min(63, round(value)))) + 64
     elif scale == "raw":          # pass through 0–127
         return int(max(0, min(127, value)))
     else:

@@ -14,7 +14,16 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from .midi_bridge import MidiBridge, MidiSendError
 from .state_store import StateStore
-from .controls import CONTROL_MAP, MIDI_CC_MAP, validate_group, resolve_channel
+from .controls import (
+    CONTROL_MAP,
+    FOCUS_NONE,
+    FOCUS_SEARCHBAR,
+    FOCUS_SIDEBAR,
+    FOCUS_TRACKS_TABLE,
+    MIDI_CC_MAP,
+    validate_group,
+    resolve_channel,
+)
 
 # stdout carries JSON-RPC on the stdio transport — logs must go to stderr.
 logging.basicConfig(
@@ -220,6 +229,87 @@ def beatjump(deck: int, beats: float) -> dict:
     midi.send_control(group, "beatjump_size", abs(beats))
     midi.send_control(group, "beatjump_forward" if beats > 0 else "beatjump_backward", 1.0)
     return {"ok": True, "deck": deck, "beatjump": beats}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LIBRARY / LOADING
+#
+# Mixxx exposes no control that loads a track by file path or by track id — the
+# only load primitive acts on whatever the library view currently highlights.
+# So loading is two steps: move the highlight, then load it. Nothing here can
+# read the highlight back, which is why load_selected_track() returns the
+# duration it actually ended up with instead of claiming success blindly.
+# ══════════════════════════════════════════════════════════════════════════════
+
+_FOCUS_WIDGETS = {
+    "none": FOCUS_NONE,
+    "searchbar": FOCUS_SEARCHBAR,
+    "sidebar": FOCUS_SIDEBAR,
+    "tracks": FOCUS_TRACKS_TABLE,
+}
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "idempotentHint": False})
+def load_selected_track(deck: int) -> dict:
+    """
+    Load the library's currently highlighted track into a deck. deck: 1–4.
+
+    Mixxx cannot load by path: this loads whatever the library highlights right
+    now. Position the highlight first (library_focus + library_move), then check
+    the returned duration to confirm the deck got the track you meant.
+    """
+    group = resolve_channel(deck)
+    midi.send_control(group, "LoadSelectedTrack", 1.0)
+    time.sleep(0.5)  # let Mixxx load the track and push track_loaded/duration back
+    return {
+        "ok": True,
+        "deck": deck,
+        "track_loaded": bool(state.get(group, "track_loaded")),
+        "duration": state.get(group, "duration"),
+    }
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "idempotentHint": False})
+def library_move(rows: int) -> dict:
+    """
+    Move the library selection by N rows. rows: -64–63, negative = up.
+
+    Relative only — Mixxx has no "select row N". To reach a known origin, send
+    a large negative move: it clamps at the top of the list.
+    """
+    if not -64 <= rows <= 63:
+        return {"ok": False, "error": "rows must be -64–63"}
+    midi.send_control("[Library]", "MoveVertical", rows)
+    return {"ok": True, "rows": rows}
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "idempotentHint": False})
+def library_go_to_item() -> dict:
+    """Activate the highlighted library item (expand a sidebar node, load a track)."""
+    midi.send_control("[Library]", "GoToItem", 1.0)
+    return {"ok": True, "action": "go_to_item"}
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "idempotentHint": True})
+def library_clear_search() -> dict:
+    """Clear the library search box, so the view is the unfiltered list again."""
+    midi.send_control("[Library]", "clear_search", 1.0)
+    return {"ok": True, "action": "clear_search"}
+
+
+@mcp.tool(annotations={"readOnlyHint": False, "idempotentHint": True})
+def library_focus(widget: str) -> dict:
+    """
+    Focus a library widget: 'none', 'searchbar', 'sidebar', or 'tracks'.
+
+    library_move() moves within whatever is focused, so focus 'tracks' before
+    moving through the track list.
+    """
+    key = widget.lower()
+    if key not in _FOCUS_WIDGETS:
+        return {"ok": False, "error": f"widget must be one of {sorted(_FOCUS_WIDGETS)}"}
+    midi.send_control("[Library]", "focused_widget", _FOCUS_WIDGETS[key])
+    return {"ok": True, "focused_widget": key}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

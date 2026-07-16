@@ -32,6 +32,37 @@ connect, and `resync_state()` can request one at any time.
   not fit in 128 CCs. Hotcue calls for decks 3–4 fail with a clear error.
 - **Track artist/title are unavailable.** Mixxx does not expose track metadata to
   controller scripts as ControlObjects. Use `track_loaded` / `duration`.
+- **Tracks cannot be loaded by path.** See below.
+
+### Loading tracks
+
+Mixxx has no control that takes a file path or a track id — `LoadSelectedTrack`
+acts on whatever the library view currently highlights, and every navigation
+control (`MoveVertical`, `SelectTrackKnob`, …) is a *relative* move. Nothing
+reports the current selection back, so the server cannot know where the
+highlight is, only move it and look at the result.
+
+That makes loading a two-step, best-effort operation:
+
+```python
+library_focus("tracks")     # move within the track list, not the sidebar
+library_move(-64)           # clamps at the top of the list = known origin
+library_move(7)             # down to the row you want
+load_selected_track(1)      # -> {"track_loaded": true, "duration": 338.9}
+```
+
+`load_selected_track()` returns the deck's `duration` after loading rather than
+just `ok: true`, because that is the only way to tell *which* track arrived.
+Compare it against the duration you expected.
+
+This is reliable when the view is small and its order is known — a playlist
+sorted by position, or a search narrowed to one hit. It is **not** reliable
+against a large sorted library: row N depends on Mixxx's locale-aware sort
+collation, which the server cannot reproduce.
+
+If you need a specific file on a specific deck with no ambiguity, pass it on the
+command line at startup instead — `mixxx "a.mp3" "b.mp3"` loads each file into
+the next virtual deck. There is no equivalent for an already-running Mixxx.
 
 ---
 
@@ -132,6 +163,11 @@ Add to `claude_desktop_config.json`:
 | `goto_hotcue(deck, slot)` | Jump to hotcue (decks 1–2) |
 | `clear_hotcue(deck, slot)` | Delete hotcue (decks 1–2) |
 | `beatjump(deck, beats)` | Jump ±N beats |
+| `load_selected_track(deck)` | Load the highlighted library track; returns the resulting `duration` |
+| `library_move(rows)` | Move library selection ±N rows (-64–63) |
+| `library_focus(widget)` | Focus `none`/`searchbar`/`sidebar`/`tracks` |
+| `library_go_to_item()` | Activate the highlighted item |
+| `library_clear_search()` | Clear the search box |
 | `get_deck_state(deck)` | Read live deck state |
 | `get_mixer_state()` | Read master mixer state |
 | `get_all_state()` | Full state dump |

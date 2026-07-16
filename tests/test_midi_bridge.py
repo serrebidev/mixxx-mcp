@@ -29,6 +29,20 @@ def test_bipolar_encoding_is_clamped():
     assert 0 <= _encode(5.0, "bipolar") <= 127
 
 
+def test_signed7_encoding_roundtrips_through_js_decode():
+    """MoveVertical(-3) must arrive as -3, not as an unsigned 3 or a clamp to 0."""
+    def js_decode(midi_val):
+        return midi_val - 64
+
+    for rows in (-64, -3, -1, 0, 1, 3, 63):
+        assert js_decode(_encode(rows, "signed7")) == rows
+
+
+def test_signed7_encoding_is_clamped_to_valid_midi():
+    for rows in (-500, 500):
+        assert 0 <= _encode(rows, "signed7") <= 127
+
+
 def test_bipolar_centre_roundtrips_exactly():
     """
     "Centre the crossfader" must actually centre it. A linear -1..1 -> 0..127

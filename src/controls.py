@@ -12,10 +12,18 @@ CC allocation (0–127, single MIDI channel). Every CC is used by exactly one
   105–111 Effects    (4 unit mixes, 3 effect enables)
   112–118 Deck-relative nudge / beatjump
   119     Resync request (server → script: re-push the full state snapshot)
-  120–127 Reserved
+  120     Active-deck select (server → script: target for deck-relative CCs)
+  121     Deck-relative LoadSelectedTrack
+  122–125 Library     (MoveVertical, GoToItem, clear_search, focused_widget)
+  126–127 Reserved
 
 Hotcues are only mapped for decks 1–2: 8 slots x 3 actions x 4 decks would not
 fit in the 128-CC space alongside everything else.
+
+Loading a track is *selection-based*, not path-based: Mixxx exposes no control
+that takes a file path or a track id, so LoadSelectedTrack acts on whatever the
+library view currently highlights. The [Library] block above is what makes that
+selection reachable — see load_selected_track() in server.py.
 
 The companion Mixxx JS script (mixxx-mcp.js) mirrors this table exactly and must
 be kept in sync — see CC_ROUTE there.
@@ -69,10 +77,18 @@ _HOTCUE_ACTIONS = ["set", "goto", "clear"]
 # this server exists, so without this the state store starts out empty.
 RESYNC_CC = 119
 
-# Not a control: selects which deck the deck-relative CCs (nudge/beatjump) act
-# on. Those share one CC across all decks, so the script needs to be told the
-# target first — otherwise every nudge lands on deck 1.
+# Not a control: selects which deck the deck-relative CCs (nudge/beatjump/
+# LoadSelectedTrack) act on. Those share one CC across all decks, so the script
+# needs to be told the target first — otherwise every nudge lands on deck 1.
 ACTIVE_DECK_CC = 120
+
+# Widget ids for [Library] focused_widget, mirroring Mixxx's
+# LibraryControl::FocusWidget enum. Set focused_widget before a MoveVertical so
+# the move lands on the tracks table rather than the sidebar or the searchbox.
+FOCUS_NONE = 0
+FOCUS_SEARCHBAR = 1
+FOCUS_SIDEBAR = 2
+FOCUS_TRACKS_TABLE = 3
 
 # Block base addresses.
 DECK12_BASE = {1: 0, 2: 38}
@@ -81,6 +97,8 @@ DECK34_BASE = {3: 76, 4: 88}
 MASTER_BASE = 100
 FX_BASE = 105
 NUDGE_BASE = 112
+LOAD_SELECTED_CC = 121
+LIBRARY_BASE = 122
 
 DECKS_WITH_HOTCUES = (1, 2)
 
@@ -134,6 +152,22 @@ for _i, (_key, _scale) in enumerate([
 ]):
     MIDI_CC_MAP[("*", _key)] = (NUDGE_BASE + _i, _scale)
 
+# LoadSelectedTrack is deck-relative for the same reason nudge is: one CC for
+# all four decks, with ACTIVE_DECK_CC naming the target first.
+MIDI_CC_MAP[("*", "LoadSelectedTrack")] = (LOAD_SELECTED_CC, "binary")
+
+# ── Library navigation ────────────────────────────────────────────────────────
+# MoveVertical is "signed7" rather than "raw": it is a relative move, so it must
+# carry a sign, and 0–127 cannot. focused_widget is an absolute enum id, so it
+# stays raw.
+for _i, (_key, _scale) in enumerate([
+    ("MoveVertical",   "signed7"),
+    ("GoToItem",       "binary"),
+    ("clear_search",   "binary"),
+    ("focused_widget", "raw"),
+]):
+    MIDI_CC_MAP[("[Library]", _key)] = (LIBRARY_BASE + _i, _scale)
+
 
 # ── Integrity checks ──────────────────────────────────────────────────────────
 # An earlier revision generated hotcue CCs that silently overwrote the Channel3,
@@ -161,7 +195,7 @@ REVERSE_MAP: Dict[int, Tuple[str, str]] = {
 
 # ── Validation ────────────────────────────────────────────────────────────────
 VALID_GROUP_PREFIXES = [
-    "[Channel", "[Sampler", "[Master]", "[Playlist]",
+    "[Channel", "[Sampler", "[Master]", "[Playlist]", "[Library]",
     "[PreviewDeck", "[EffectRack", "[Microphone",
 ]
 

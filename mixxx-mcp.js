@@ -77,6 +77,8 @@ const DECK34_BASE = { 3: 76, 4: 88 };
 const MASTER_BASE = 100;
 const FX_BASE = 105;
 const NUDGE_BASE = 112;
+const LOAD_SELECTED_CC = 121;
+const LIBRARY_BASE = 122;
 
 const CC_ROUTE = {};
 
@@ -128,6 +130,15 @@ const CC_ROUTE = {};
      ["beatjump_backward", "binary"]].forEach(([key, scale], i) => {
         CC_ROUTE[NUDGE_BASE + i] = { group: null, key, scale, deckRelative: true };
     });
+    // Deck-relative load: one CC for all four decks, ACTIVE_DECK_CC picks the target.
+    CC_ROUTE[LOAD_SELECTED_CC] = {
+        group: null, key: "LoadSelectedTrack", scale: "binary", deckRelative: true,
+    };
+    // Library navigation
+    [["MoveVertical", "signed7"], ["GoToItem", "binary"],
+     ["clear_search", "binary"], ["focused_widget", "raw"]].forEach(([key, scale], i) => {
+        CC_ROUTE[LIBRARY_BASE + i] = { group: "[Library]", key, scale };
+    });
 })();
 
 // ── Controls to watch (state push to Python) ──────────────────────────────
@@ -146,8 +157,13 @@ const WATCH = {
                    "sync_enabled","loop_enabled","beatloop_size",
                    "filterLow","filterMid","filterHigh",
                    "track_loaded","duration","track_samplerate"],
-    "[Channel3]": ["play","bpm","playposition","volume","rate","sync_enabled"],
-    "[Channel4]": ["play","bpm","playposition","volume","rate","sync_enabled"],
+    // track_loaded/duration are watched on every deck, not just 1–2: they are the
+    // only way to tell whether a deck has a track (there is no track metadata),
+    // and load_selected_track() reads duration back to confirm what it loaded.
+    "[Channel3]": ["play","bpm","playposition","volume","rate","sync_enabled",
+                   "track_loaded","duration"],
+    "[Channel4]": ["play","bpm","playposition","volume","rate","sync_enabled",
+                   "track_loaded","duration"],
     "[Master]":   ["crossfader","volume","headVolume","headMix","balance"],
     "[EffectRack1_EffectUnit1]": ["mix","enabled"],
     "[EffectRack1_EffectUnit2]": ["mix","enabled"],
@@ -167,6 +183,8 @@ function decode(midiVal, scale) {
             const sizes = [0.03125,0.0625,0.125,0.25,0.5,1,2,4,8,16,32,64];
             return sizes[Math.round((midiVal / 127.0) * (sizes.length - 1))] || 4;
         }
+        // Relative step count centred on 64 — see _encode() in src/midi_bridge.py.
+        case "signed7": return midiVal - 64;
         case "raw": return midiVal;
         default:    return midiVal / 127.0;
     }
@@ -208,7 +226,14 @@ const TRIGGER_KEYS = new Set([
     "cue_default","beatloop_activate","reloop_toggle",
     "loop_halve","loop_double","beatjump_forward","beatjump_backward",
     "rate_perm_up_small","rate_perm_down_small","rate_perm_up","rate_perm_down",
+    "LoadSelectedTrack","GoToItem","clear_search",
 ]);
+
+// Relative encoders: Mixxx drops a setValue that does not change the control
+// (ControlDoublePrivate ignores no-ops), so sending MoveVertical=1 twice in a
+// row would move once and then silently do nothing. Reset to 0 first — a
+// 0-step move is itself a no-op — so the real value is always a change.
+const RELATIVE_KEYS = new Set(["MoveVertical"]);
 
 // ── Main controller object ────────────────────────────────────────────────
 // Declared with `var`, not `const`: Mixxx resolves the mapping's function names
@@ -307,6 +332,14 @@ var MixxxMCP = {
         // Pulse triggers
         if (TRIGGER_KEYS.has(route.key)) {
             if (val === 1.0) script.triggerControl(grp, route.key, 100);
+            return;
+        }
+
+        if (RELATIVE_KEYS.has(route.key)) {
+            if (val === 0) return;
+            engine.setValue(grp, route.key, 0);
+            engine.setValue(grp, route.key, val);
+            console.log(`[mixxx-mcp] MOVE ${grp}.${route.key} by ${val}`);
             return;
         }
 

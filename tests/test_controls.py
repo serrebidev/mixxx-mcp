@@ -13,6 +13,7 @@ import pytest
 from src.controls import (
     ACTIVE_DECK_CC,
     BEATLOOP_SIZES,
+    FOCUS_TRACKS_TABLE,
     MIDI_CC_MAP,
     RESYNC_CC,
     resolve_channel,
@@ -85,3 +86,33 @@ def test_validate_group_rejects_unknown():
 def test_beatloop_sizes_sorted_and_positive():
     assert BEATLOOP_SIZES == sorted(BEATLOOP_SIZES)
     assert all(s > 0 for s in BEATLOOP_SIZES)
+
+
+# ── Library / loading ─────────────────────────────────────────────────────────
+
+def test_load_selected_track_is_deck_relative():
+    """One CC serves all four decks; ACTIVE_DECK_CC names the target."""
+    assert ("*", "LoadSelectedTrack") in MIDI_CC_MAP
+    for deck in (1, 2, 3, 4):
+        assert (f"[Channel{deck}]", "LoadSelectedTrack") not in MIDI_CC_MAP
+
+
+@pytest.mark.parametrize("key", [
+    "MoveVertical", "GoToItem", "clear_search", "focused_widget",
+])
+def test_library_controls_are_mapped(key):
+    assert ("[Library]", key) in MIDI_CC_MAP
+
+
+def test_move_vertical_is_signed():
+    """A relative move must carry a sign; unipolar/raw cannot express 'up'."""
+    _cc, scale = MIDI_CC_MAP[("[Library]", "MoveVertical")]
+    assert scale == "signed7"
+
+
+def test_library_group_validates():
+    validate_group("[Library]")
+
+
+def test_focus_ids_match_mixxx_enum():
+    assert FOCUS_TRACKS_TABLE == 3
