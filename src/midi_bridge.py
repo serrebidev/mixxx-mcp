@@ -20,7 +20,7 @@ SysEx it emits (it matches no CC mapping) and we ignore the CCs we emit.
 
 import json
 import logging
-import os
+import sys
 from typing import Optional
 
 # SysEx framing shared with mixxx-mcp.js: F0 <MCP_SYSEX_ID> <ascii json> F7.
@@ -163,19 +163,27 @@ class MidiBridge:
                 if self.PORT_NAME in name:
                     idx = i
                     break
-            if idx is None:
+            # SysEx is filtered out by default; we depend on it entirely.
+            self._in.ignore_types(sysex=False, timing=True, active_sense=True)
+            if idx is None and sys.platform.startswith("linux"):
+                # ALSA virtual input and output ports are separate endpoints.
+                # connect() creates the output/source; create the matching
+                # input/destination here so Mixxx can send state back to us.
+                self._in.open_virtual_port(self.PORT_NAME)
+                log.info("State listener created virtual MIDI input '%s'",
+                         self.PORT_NAME)
+            elif idx is None:
                 log.warning(
                     "MIDI input port '%s' not found — state will be unavailable",
                     self.PORT_NAME,
                 )
                 return False
-            # SysEx is filtered out by default; we depend on it entirely.
-            self._in.ignore_types(sysex=False, timing=True, active_sense=True)
-            self._in.open_port(idx)
+            else:
+                self._in.open_port(idx)
+                log.info("State listener attached to MIDI input '%s'",
+                         self._in.get_port_name(idx))
             self._in.set_callback(self._on_midi, data=store)
             self._listening = True
-            log.info("State listener attached to MIDI input '%s'",
-                     self._in.get_port_name(idx))
             return True
         except Exception as e:
             log.error("Could not start state listener: %s", e)

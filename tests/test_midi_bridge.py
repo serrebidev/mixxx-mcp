@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+import src.midi_bridge as midi_bridge
 from src.controls import BEATLOOP_SIZES
 from src.midi_bridge import MCP_SYSEX_ID, MidiBridge, MidiSendError, _encode
 from src.state_store import StateStore
@@ -104,8 +105,65 @@ class _FakeOut:
         self.sent.append(list(msg))
 
 
+class _FakeIn:
+    def __init__(self, ports=()):
+        self.ports = list(ports)
+        self.ignored = None
+        self.opened_port = None
+        self.virtual_port = None
+        self.callback = None
+
+    def get_ports(self):
+        return self.ports
+
+    def ignore_types(self, **kwargs):
+        self.ignored = kwargs
+
+    def open_port(self, index):
+        self.opened_port = index
+
+    def open_virtual_port(self, name):
+        self.virtual_port = name
+
+    def get_port_name(self, index):
+        return self.ports[index]
+
+    def set_callback(self, callback, data=None):
+        self.callback = (callback, data)
+
+
 def _sysex(payload: str):
     return [0xF0, MCP_SYSEX_ID] + [ord(c) for c in payload] + [0xF7]
+
+
+def test_state_listener_creates_virtual_input_on_linux(monkeypatch):
+    fake_in = _FakeIn()
+    monkeypatch.setattr(midi_bridge, "HAS_RTMIDI", True)
+    monkeypatch.setattr(midi_bridge.sys, "platform", "linux")
+    monkeypatch.setattr(midi_bridge.rtmidi, "MidiIn", lambda: fake_in)
+
+    store = StateStore()
+    bridge = MidiBridge()
+
+    assert bridge.start_state_listener(store) is True
+    assert fake_in.virtual_port == bridge.PORT_NAME
+    assert fake_in.opened_port is None
+    assert fake_in.ignored == {
+        "sysex": False,
+        "timing": True,
+        "active_sense": True,
+    }
+    assert fake_in.callback == (bridge._on_midi, store)
+
+
+def test_state_listener_opens_existing_input(monkeypatch):
+    fake_in = _FakeIn(["other", "mixxx-mcp through port"])
+    monkeypatch.setattr(midi_bridge, "HAS_RTMIDI", True)
+    monkeypatch.setattr(midi_bridge.rtmidi, "MidiIn", lambda: fake_in)
+
+    assert MidiBridge().start_state_listener(StateStore()) is True
+    assert fake_in.opened_port == 1
+    assert fake_in.virtual_port is None
 
 
 def test_on_midi_stores_state_from_sysex():

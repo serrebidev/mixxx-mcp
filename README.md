@@ -51,11 +51,15 @@ highlight is, only move it and look at the result.
 That makes loading a two-step, best-effort operation:
 
 ```python
-library_focus("tracks")     # move within the track list, not the sidebar
 library_move(-64)           # clamps at the top of the list = known origin
 library_move(7)             # down to the row you want
 load_selected_track(1)      # -> {"track_loaded": true, "duration": 338.9}
 ```
+
+`library_move()` uses `[Playlist],SelectTrackKnob`, so it works while Mixxx is
+in the background. `library_focus()` and `library_go_to_item()` use `[Library]`
+controls that emulate keyboard actions and require a Mixxx window to have
+keyboard focus.
 
 `load_selected_track()` returns the deck's `duration` after loading rather than
 just `ok: true`, because that is the only way to tell *which* track arrived.
@@ -172,9 +176,9 @@ Add to `claude_desktop_config.json`:
 | `clear_hotcue(deck, slot)` | Delete hotcue (decks 1–2) |
 | `beatjump(deck, beats)` | Jump ±N beats |
 | `load_selected_track(deck)` | Load the highlighted library track; returns the resulting `duration` |
-| `library_move(rows)` | Move library selection ±N rows (-64–63) |
-| `library_focus(widget)` | Focus `none`/`searchbar`/`sidebar`/`tracks` |
-| `library_go_to_item()` | Activate the highlighted item |
+| `library_move(rows)` | Move track-table selection ±N rows (-64–63), independent of keyboard focus |
+| `library_focus(widget)` | Focus `none`/`searchbar`/`sidebar`/`tracks` (requires Mixxx keyboard focus) |
+| `library_go_to_item()` | Activate the highlighted item (requires Mixxx keyboard focus) |
 | `library_clear_search()` | Clear the search box |
 | `get_deck_state(deck)` | Read live deck state |
 | `get_mixer_state()` | Read master mixer state |

@@ -101,15 +101,16 @@ def test_load_selected_track_is_deck_relative():
 
 
 @pytest.mark.parametrize("key", [
-    "MoveVertical", "GoToItem", "clear_search", "focused_widget",
+    "GoToItem", "clear_search", "focused_widget",
 ])
 def test_library_controls_are_mapped(key):
     assert ("[Library]", key) in MIDI_CC_MAP
 
 
-def test_move_vertical_is_signed():
+def test_track_selection_is_focus_independent_and_signed():
     """A relative move must carry a sign; unipolar/raw cannot express 'up'."""
-    _cc, scale = MIDI_CC_MAP[("[Library]", "MoveVertical")]
+    assert ("[Library]", "MoveVertical") not in MIDI_CC_MAP
+    _cc, scale = MIDI_CC_MAP[("[Playlist]", "SelectTrackKnob")]
     assert scale == "signed7"
 
 

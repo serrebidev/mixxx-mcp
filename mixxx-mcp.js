@@ -138,10 +138,15 @@ const CC_ROUTE = {};
     CC_ROUTE[LOAD_SELECTED_CC] = {
         group: null, key: "LoadSelectedTrack", scale: "binary", deckRelative: true,
     };
-    // Library navigation
-    [["MoveVertical", "signed7"], ["GoToItem", "binary"],
-     ["clear_search", "binary"], ["focused_widget", "raw"]].forEach(([key, scale], i) => {
-        CC_ROUTE[LIBRARY_BASE + i] = { group: "[Library]", key, scale };
+    // Track-table navigation uses the focus-independent legacy control. The
+    // [Library] Move controls emulate keypresses and fail when Mixxx does not
+    // have keyboard focus (which is normally the case while an agent runs).
+    CC_ROUTE[LIBRARY_BASE] = {
+        group: "[Playlist]", key: "SelectTrackKnob", scale: "signed7",
+    };
+    [["GoToItem", "binary"], ["clear_search", "binary"],
+     ["focused_widget", "raw"]].forEach(([key, scale], i) => {
+        CC_ROUTE[LIBRARY_BASE + 1 + i] = { group: "[Library]", key, scale };
     });
     // Beatmatching: phase alignment and beatgrid repair, both deck-relative.
     CC_ROUTE[BEATSYNC_PHASE_CC] = {
@@ -158,23 +163,26 @@ const WATCH = {
     // logs "non-existent" and returns 0.0 for them, so watching them only
     // produced misleading zeroes. Track metadata is not exposed to controller
     // scripts; use track_loaded/duration to tell whether a deck has a track.
+    // beat_distance is the only way to see beat phase. Without it "synced"
+    // decks that sound unmixed cannot be told from aligned ones, and
+    // beatsync_phase cannot be verified -- it reports nothing back.
     "[Channel1]": ["play","bpm","playposition","volume","pregain","rate",
                    "sync_enabled","loop_enabled","beatloop_size",
                    "filterLow","filterMid","filterHigh",
-                   "track_loaded","duration","track_samplerate",
+                   "track_loaded","duration","track_samplerate","beat_distance",
                    "hotcue_1_position","hotcue_2_position","hotcue_3_position",
                    "hotcue_4_position"],
     "[Channel2]": ["play","bpm","playposition","volume","pregain","rate",
                    "sync_enabled","loop_enabled","beatloop_size",
                    "filterLow","filterMid","filterHigh",
-                   "track_loaded","duration","track_samplerate"],
+                   "track_loaded","duration","track_samplerate","beat_distance"],
     // track_loaded/duration are watched on every deck, not just 1–2: they are the
     // only way to tell whether a deck has a track (there is no track metadata),
     // and load_selected_track() reads duration back to confirm what it loaded.
     "[Channel3]": ["play","bpm","playposition","volume","rate","sync_enabled",
-                   "track_loaded","duration"],
+                   "track_loaded","duration","beat_distance"],
     "[Channel4]": ["play","bpm","playposition","volume","rate","sync_enabled",
-                   "track_loaded","duration"],
+                   "track_loaded","duration","beat_distance"],
     "[Master]":   ["crossfader","volume","headVolume","headMix","balance"],
     "[EffectRack1_EffectUnit1]": ["mix","enabled"],
     "[EffectRack1_EffectUnit2]": ["mix","enabled"],
@@ -242,10 +250,10 @@ const TRIGGER_KEYS = new Set([
 ]);
 
 // Relative encoders: Mixxx drops a setValue that does not change the control
-// (ControlDoublePrivate ignores no-ops), so sending MoveVertical=1 twice in a
+// (ControlDoublePrivate ignores no-ops), so sending SelectTrackKnob=1 twice in a
 // row would move once and then silently do nothing. Reset to 0 first — a
 // 0-step move is itself a no-op — so the real value is always a change.
-const RELATIVE_KEYS = new Set(["MoveVertical"]);
+const RELATIVE_KEYS = new Set(["SelectTrackKnob"]);
 
 // ── Main controller object ────────────────────────────────────────────────
 // Declared with `var`, not `const`: Mixxx resolves the mapping's function names

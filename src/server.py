@@ -290,8 +290,8 @@ def load_selected_track(deck: int) -> dict:
     Load the library's currently highlighted track into a deck. deck: 1–4.
 
     Mixxx cannot load by path: this loads whatever the library highlights right
-    now. Position the highlight first (library_focus + library_move), then check
-    the returned duration to confirm the deck got the track you meant.
+    now. Position the highlight first with library_move(), then check the
+    returned duration to confirm the deck got the track you meant.
     """
     group = resolve_channel(deck)
     midi.send_control(group, "LoadSelectedTrack", 1.0)
@@ -307,14 +307,15 @@ def load_selected_track(deck: int) -> dict:
 @mcp.tool(annotations={"readOnlyHint": False, "idempotentHint": False})
 def library_move(rows: int) -> dict:
     """
-    Move the library selection by N rows. rows: -64–63, negative = up.
+    Move the track-table selection by N rows. rows: -64–63, negative = up.
 
     Relative only — Mixxx has no "select row N". To reach a known origin, send
-    a large negative move: it clamps at the top of the list.
+    a large negative move: it clamps at the top of the list. This uses
+    [Playlist],SelectTrackKnob, which works even when Mixxx lacks keyboard focus.
     """
     if not -64 <= rows <= 63:
         return {"ok": False, "error": "rows must be -64–63"}
-    midi.send_control("[Library]", "MoveVertical", rows)
+    midi.send_control("[Playlist]", "SelectTrackKnob", rows)
     return {"ok": True, "rows": rows}
 
 
@@ -337,8 +338,9 @@ def library_focus(widget: str) -> dict:
     """
     Focus a library widget: 'none', 'searchbar', 'sidebar', or 'tracks'.
 
-    library_move() moves within whatever is focused, so focus 'tracks' before
-    moving through the track list.
+    Mixxx only honors this control while one of its windows has keyboard focus.
+    library_move() does not need this control; use it only before a
+    focus-dependent action such as library_go_to_item().
     """
     key = widget.lower()
     if key not in _FOCUS_WIDGETS:
@@ -354,7 +356,12 @@ def library_focus(widget: str) -> dict:
 @mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True})
 def get_deck_state(deck: int) -> dict:
     """
-    Read all live state for a deck: BPM, position, volume, EQ, loop, sync.
+    Read all live state for a deck: BPM, position, volume, EQ, loop, sync, phase.
+
+    beat_distance is the deck's position within the current beat (0.0–1.0). Two
+    decks are beat-aligned when theirs match; a gap near 0.5 means they are half
+    a beat apart — matching tempo but sounding unmixed. It is the only way to
+    check phase, since beatsync_phase reports nothing back.
 
     Track artist/title are not available — Mixxx does not expose track metadata
     to controller scripts as ControlObjects. Use track_loaded/duration to tell
@@ -365,7 +372,7 @@ def get_deck_state(deck: int) -> dict:
         "play","bpm","playposition","volume","pregain",
         "filterLow","filterMid","filterHigh","rate",
         "sync_enabled","loop_enabled","beatloop_size",
-        "track_loaded","duration","track_samplerate",
+        "track_loaded","duration","track_samplerate","beat_distance",
     ]
     result = {"deck": deck, "group": group, "state": {}}
     for k in keys:

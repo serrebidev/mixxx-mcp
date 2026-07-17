@@ -14,7 +14,8 @@ CC allocation (0–127, single MIDI channel). Every CC is used by exactly one
   119     Resync request (server → script: re-push the full state snapshot)
   120     Active-deck select (server → script: target for deck-relative CCs)
   121     Deck-relative LoadSelectedTrack
-  122–125 Library     (MoveVertical, GoToItem, clear_search, focused_widget)
+  122     Playlist    (SelectTrackKnob)
+  123–125 Library     (GoToItem, clear_search, focused_widget)
   126     Deck-relative beatsync_phase
   127     Deck-relative bpm
 
@@ -88,8 +89,9 @@ RESYNC_CC = 119
 ACTIVE_DECK_CC = 120
 
 # Widget ids for [Library] focused_widget, mirroring Mixxx's
-# LibraryControl::FocusWidget enum. Set focused_widget before a MoveVertical so
-# the move lands on the tracks table rather than the sidebar or the searchbox.
+# LibraryControl::FocusWidget enum. This control only works while a Mixxx window
+# has keyboard focus; track-table movement uses [Playlist],SelectTrackKnob so it
+# remains reliable while an agent is active in another application.
 FOCUS_NONE = 0
 FOCUS_SEARCHBAR = 1
 FOCUS_SIDEBAR = 2
@@ -179,15 +181,15 @@ MIDI_CC_MAP[("*", "beatsync_phase")] = (BEATSYNC_PHASE_CC, "binary")
 MIDI_CC_MAP[("*", "bpm")] = (BPM_CC, "bpm")
 
 # ── Library navigation ────────────────────────────────────────────────────────
-# MoveVertical is "signed7" rather than "raw": it is a relative move, so it must
-# carry a sign, and 0–127 cannot. focused_widget is an absolute enum id, so it
-# stays raw.
+# SelectTrackKnob is "signed7" rather than "raw": it is a relative move, so it
+# must carry a sign, and 0–127 cannot. Unlike [Library],MoveVertical it does not
+# emulate a keypress and therefore does not require Mixxx to have keyboard focus.
+MIDI_CC_MAP[("[Playlist]", "SelectTrackKnob")] = (LIBRARY_BASE, "signed7")
 for _i, (_key, _scale) in enumerate([
-    ("MoveVertical",   "signed7"),
     ("GoToItem",       "binary"),
     ("clear_search",   "binary"),
     ("focused_widget", "raw"),
-]):
+], start=1):
     MIDI_CC_MAP[("[Library]", _key)] = (LIBRARY_BASE + _i, _scale)
 
 
